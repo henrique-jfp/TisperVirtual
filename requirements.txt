@@ -1,0 +1,23 @@
+streamlit
+sentence-transformers
+requests
+openai
+pandas
+python-dotenv
+markdown
+bleach
+icalendar
+PyYAML
+Pillow
+pymupdf
+google-cloud-vision
+playwright
+beautifulsoup4
+sqlalchemy
+psycopg2-binary # Exemplo para PostgreSQL, troque se usar outro banco (ex: mysql-connector-python)
+pdfplumber
+playwright
+langchain
+langchain-community
+langchain-groq
+supabase

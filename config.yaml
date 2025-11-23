@@ -1,0 +1,34 @@
+# GHOST: Arquivo de configuração para os alvos de extração.
+# Adicione novos alvos aqui sem precisar tocar no código Python.
+
+alvos:
+  flashscore_futebol:
+    # URL da página inicial a ser aberta.
+    url: "https://www.flashscore.com/"
+    
+    # Descrição do que este alvo faz.
+    descricao: "Captura partidas de futebol terminadas do Flashscore."
+    
+    # Seletores CSS para controlar a navegação e espera.
+    seletores:
+      # Seletor de um elemento que deve estar visível para garantir que a página principal carregou.
+      espera_inicial: "#live-table"
+      
+      # Seletor do elemento que o robô deve clicar para carregar os dados.
+      acao_clique: ".tabs__tab.event__tab--finished"
+      
+      # Seletor de um elemento que aparece APÓS o clique, para confirmar que os dados foram carregados.
+      espera_pos_acao: ".event__match--finished"
+      
+    # Filtros para a captura de rede.
+    filtros_url:
+      # O robô capturará qualquer requisição XHR/Fetch cuja URL contenha esta string.
+      - "/x/feed/"
+      
+    # Nome base para os arquivos JSON salvos.
+    nome_base_arquivo: "partidas_futebol_terminadas"
+
+  # Exemplo: Você poderia adicionar um novo alvo para basquete aqui.
+  # flashscore_basquete:
+  #   url: "https://www.flashscore.com/basketball/"
+  #   ... e assim por diante ...
