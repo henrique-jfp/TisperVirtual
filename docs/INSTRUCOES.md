@@ -29,16 +29,19 @@ playwright install chromium
 
 ### Passo 2.2: Configurar o Banco de Dados
 
-O sistema usa PostgreSQL (via Supabase ou local).
+O sistema usa por padrão um banco local SQLite para execução em servidores domésticos (Termux). Se desejar, é possível apontar para um Postgres remoto substituindo a URL de conexão.
 
-1.  **Obtenha sua URL de Conexão**: Seja de um provedor como Supabase ou de uma instância local.
-2.  **Crie um arquivo `.env`** na raiz do projeto.
-3.  **Adicione a URL** ao arquivo, substituindo com suas credenciais:
+1.  **Configuração local (recomendada):** defina em `.env`:
 
-    ```.env
-    DATABASE_URL="postgresql://SEU_USUARIO:SUA_SENHA@SEU_HOST:5432/SEU_BANCO"
-    ```
-    O script carregará esta variável automaticamente.
+  ```env
+  DATABASE_URL=sqlite:///./db/tradecomigo.sqlite3
+  ```
+
+2.  **Configuração remota (opcional):** se você for usar um Postgres remoto, forneça a URL no mesmo formato:
+
+  ```env
+  DATABASE_URL="postgresql://SEU_USUARIO:SUA_SENHA@SEU_HOST:5432/SEU_BANCO"
+  ```
 
 ## 3. Como Capturar Dados
 

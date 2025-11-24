@@ -1,7 +1,7 @@
--- DDL para Postgres (Supabase) - Modelo completo para coleta do Brasileirão
--- Execute no SQL Editor do Supabase ou com psql; inclui IF NOT EXISTS para segurança.
--- DDL para Postgres (Supabase) - Modelo preciso e cirúrgico para coleta do Brasileirão
--- Execute no SQL Editor do Supabase ou com psql; inclui IF NOT EXISTS para segurança.
+-- DDL para bancos SQL (histórico): modelo completo para coleta do Brasileirão
+-- Observação: este arquivo contém uma versão orientada a Postgres (jsonb, timestamptz).
+-- Para execução local usamos `schema.sql` (compatível com SQLite). Use este arquivo como referência
+-- caso precise aplicar o DDL em um Postgres remoto.
 
 -- =======================================================
 -- 1) competitions (campeonatos)

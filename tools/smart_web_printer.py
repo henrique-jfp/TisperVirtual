@@ -42,6 +42,13 @@ except ImportError as e:
 # Carregar variáveis de ambiente
 load_dotenv()
 
+# Garantir saída UTF-8 no Windows para evitar UnicodeEncodeError ao imprimir
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
 
 # ==================== CONFIGURAÇÃO ====================
 
@@ -209,8 +216,7 @@ class SmartWebPrinter:
         '[id*="google_ads"]', '[class*="google-ads"]', '[id*="adsbygoogle"]',
         '[class*="advertisement"]', '[class*="ads-banner"]', '[class*="sponsored"]',
         '[id*="banner"]', '[class*="popup"]', '[class*="modal"]',
-        '[class*="social-share"]', 'nav', 'header', 'footer', 'aside', '[class*="comment"]',
-        'script', 'style', 'iframe'
+        '[class*="social-share"]', '[class*="comment"]', 'script', 'style', 'iframe'
     ]
 
     CONTENT_PROMPTS = {
@@ -253,39 +259,100 @@ class SmartWebPrinter:
         """Fecha o browser e desliga o executor"""
         if self.browser:
             self.logger.info("Fechando instância do browser...")
-            await self.browser.close()
+            try:
+                await self.browser.close()
+            except Exception as e:
+                self.logger.warning(f"Erro ao fechar browser: {e}")
+            finally:
+                self.browser = None
+
         if self.playwright:
-            await self.playwright.__aexit__(exc_type, exc_val, exc_tb)
-        
-        self.executor.shutdown(wait=True)
+            # Playwright não expõe __aexit__ no objeto Playwright; usar stop()
+            try:
+                await self.playwright.stop()
+            except Exception as e:
+                self.logger.warning(f"Erro ao parar playwright: {e}")
+            finally:
+                self.playwright = None
+
+        try:
+            self.executor.shutdown(wait=True)
+        except Exception:
+            pass
+
         self.logger.info("Recursos liberados.")
 
     def _convert_html_to_markdown(self, html_content: str) -> str:
         """
         [CPU-BOUND] Limpa o HTML com BeautifulSoup e converte para Markdown.
-        Executada em um ThreadPoolExecutor para não bloquear o loop.
+        Tenta extrair o conteúdo principal de '#detail' e os elementos de estatística.
         """
         try:
-            # 1. Limpeza com BeautifulSoup
             soup = BeautifulSoup(html_content, 'html.parser')
             
-            # Remover elementos indesejados
+            # Extrair campeonato do meta tag, uma fonte mais confiável
+            championship_text = ""
+            championship_meta = soup.select_one('meta[property="og:description"]')
+            if championship_meta and championship_meta.get('content'):
+                # Formato: "PAÍS: CAMPEONATO - Rodada X"
+                content = championship_meta['content']
+                parts = content.split(':')
+                if len(parts) > 1:
+                    # Pega a parte do campeonato, remove " - Rodada X" se existir
+                    championship_part = parts[1].split(' - ')[0].strip()
+                    championship_text = championship_part
+
+            main_content = soup.select_one('#detail')
+            
+            if main_content:
+                # Seletores para as informações essenciais do jogo
+                date_element = main_content.select_one('.duelParticipant__startTime')
+                teams_elements = main_content.select('.participant__participantName')
+                score_element = main_content.select_one('.detailScore__wrapper')
+                stats_elements = main_content.select('div[data-testid^="wcl-statistics-"]')
+
+                if stats_elements:
+                    clean_soup = BeautifulSoup('<div></div>', 'html.parser')
+                    container = clean_soup.div
+
+                    # Adiciona os elementos na ordem correta
+                    if championship_text:
+                        championship_tag = soup.new_tag('p')
+                        championship_tag.string = championship_text
+                        container.append(championship_tag)
+                    if date_element:
+                        container.append(date_element)
+                    for team in teams_elements:
+                        container.append(team)
+                    if score_element:
+                        container.append(score_element)
+                    for el in stats_elements:
+                        container.append(el)
+                    
+                    main_content = container
+                else:
+                    self.logger.warning("Nenhum elemento de estatística com 'data-testid' encontrado em '#detail'.")
+
+            if not main_content:
+                self.logger.warning("Container '#detail' não encontrado, usando 'body' como fallback.")
+                main_content = soup.body
+                if not main_content:
+                    self.logger.error("Tag 'body' não encontrada no HTML.")
+                    return ""
+
             for selector in self.AD_SELECTORS:
-                for element in soup.select(selector):
+                for element in main_content.select(selector):
                     element.decompose()
 
-            # 2. Conversão para Markdown
             h = html2text.HTML2Text()
-            h.ignore_links = False
+            h.ignore_links = True
             h.ignore_images = True
-            h.body_width = 0  # 0 = sem quebra de linha forçada
-            h.protect_links = True
+            h.body_width = 0
             
-            markdown = h.handle(str(soup))
+            markdown = h.handle(str(main_content))
 
-            # 3. Limpeza final do Markdown (linhas vazias excessivas)
             lines = [line.strip() for line in markdown.split('\n')]
-            clean_markdown = '\n'.join(line for line in lines if line)
+            clean_markdown = '\n'.join(line for line in lines if line and 'publicidade' not in line.lower())
             
             return clean_markdown
         except Exception as e:
@@ -402,8 +469,20 @@ Formato de resposta esperado:
             result = response.choices[0].message.content.strip()
             # Limpeza de segurança para JSON
             result = re.sub(r'^```(?:json)?\s*|\s*```$', '', result).strip()
-            
-            structured_data = json.loads(result)
+
+            if not result:
+                self.logger.warning('LLM retornou resposta vazia.')
+                return self._create_error_result(url, 'LLM returned empty response')
+
+            try:
+                structured_data = json.loads(result)
+            except Exception as e:
+                # Logar o output cru para depuração
+                try:
+                    self.logger.error(f"Falha ao parsear JSON retornado pelo LLM. Raw output: {result!r}")
+                except Exception:
+                    self.logger.error('Falha ao logar saída bruta do LLM')
+                return self._create_error_result(url, f'Invalid JSON from LLM: {str(e)}')
             structured_data.update({
                 'source_url': url,
                 'extracted_at': datetime.now().isoformat(),
@@ -446,6 +525,15 @@ Formato de resposta esperado:
             raw_html = await self._get_page_html(url)
             if not raw_html:
                 return self._create_error_result(url, "Falha ao obter HTML")
+
+            # Salvar HTML para depuração
+            debug_html_path = self.config.output_dir / 'debug_page.html'
+            try:
+                with open(debug_html_path, 'w', encoding='utf-8') as f:
+                    f.write(raw_html)
+                self.logger.info(f"HTML bruto salvo para depuração em: {debug_html_path}")
+            except Exception as e:
+                self.logger.error(f"Falha ao salvar HTML de depuração: {e}")
 
             # 3. Converter para Markdown (CPU Bound - ThreadPool)
             loop = asyncio.get_running_loop()
@@ -492,25 +580,25 @@ class CLI:
             # Context Manager garante que o browser abra uma vez e feche ao final
             async with SmartWebPrinter(Config()) as printer:
                 command = args[1]
-                
+
                 if command == 'process':
                     await self.cmd_process(printer, args[2:])
                 else:
-                    print(f"❌ Comando desconhecido: {command}")
+                    printer.logger.error(f"Comando desconhecido: {command}")
                     self.print_usage()
                     
         except Exception as e:
-            print(f"❌ Erro fatal na execução: {e}")
+            sys.stderr.write(f"ERROR: Erro fatal na execução: {e}\n")
 
     async def cmd_process(self, printer: SmartWebPrinter, args: List[str]):
         if not args:
-            print("❌ URL não fornecida")
+            sys.stderr.write("ERROR: URL não fornecida\n")
             return
             
         url = args[0]
         force = '--force' in args
 
-        print(f"\n🚀 Processando: {url}")
+        printer.logger.info(f"Processando: {url}")
         result = await printer.process_web_content(url, force=force)
 
         if result:
@@ -533,6 +621,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n\n⚠️  Interrompido pelo usuário")
+        sys.stderr.write("\n\nInterrupted by user\n")
     except Exception as e:
-        print(f"\n❌ Erro não tratado: {e}")
+        sys.stderr.write(f"\nERROR: Erro não tratado: {e}\n")

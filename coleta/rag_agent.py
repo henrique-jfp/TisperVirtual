@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 from dotenv import load_dotenv
-from supabase import create_client
+from coleta.banco_dados import BancoDados
 import requests
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -31,28 +31,23 @@ except Exception:
 load_dotenv()
 
 # --- Configurações ---
-SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
-SUPABASE_KEY = os.getenv("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("NEXT_PUBLIC_DATABASE_URL") or os.getenv("DB_URL")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DEFAULT_SEASON = int(os.getenv("DEFAULT_SEASON", datetime.now().year))
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY")
 
-# Validação de chaves
-if not all([SUPABASE_URL, SUPABASE_KEY]):
-    logger.error("Variáveis Supabase não configuradas!")
-if not API_FOOTBALL_KEY:
-    logger.warning("API_FOOTBALL_KEY não configurada - usando apenas dados locais")
-if not GROQ_API_KEY:
-    logger.warning("GROQ_API_KEY não configurada - IA desabilitada")
+if not DATABASE_URL:
+    logger.error("Variável DATABASE_URL não configurada. Usar SQLite local ex: sqlite:///./db/tradecomigo.sqlite3")
 
-_supabase_key_used = SUPABASE_SERVICE_ROLE_KEY if SUPABASE_SERVICE_ROLE_KEY else SUPABASE_KEY
-if SUPABASE_SERVICE_ROLE_KEY:
-    logger.info("Usando SUPABASE_SERVICE_ROLE_KEY para operações servidor-side")
-else:
-    logger.info("Service role não encontrado, usando chave publishable (pode ser limitada)")
-
-supabase = create_client(SUPABASE_URL, _supabase_key_used)
+# Inicializa conexão com BancoDados (SQLite por padrão)
+db = None
+try:
+    if DATABASE_URL:
+        db = BancoDados(DATABASE_URL)
+        db.conectar()
+        logger.info("BancoDados conectado via DATABASE_URL")
+except Exception as e:
+    logger.error(f"Falha ao conectar com BancoDados: {e}")
 
 # --- Mapeamento de Times (nome -> api_id) ---
 TEAMS_MAP = {
@@ -284,8 +279,11 @@ Forneça:
 class FootballTipsterBot:
     """Bot inteligente de análise de futebol com RAG"""
     
-    def __init__(self, supabase_client, api_football_key: str = None, groq_key: str = None):
+    def __init__(self, supabase_client=None, api_football_key: str = None, groq_key: str = None):
+        # manter compatibilidade com chamadas antigas que passam supabase_client,
+        # mas priorizar o wrapper local `db` (BancoDados)
         self.supabase = supabase_client
+        self.db = db
         self.today = datetime.now().date()
         
         # Inicializar clientes externos
@@ -293,14 +291,15 @@ class FootballTipsterBot:
         self.fd_client = fd if FD_AVAILABLE else None
         self.ai_analyzer = AIAnalyzer(groq_key) if groq_key else None
 
-        # Checar conexão com Supabase (select simples)
+        # Testa conexão com DB local via BancoDados
         try:
-            # consulta genérica para validar conexão sem depender de colunas específicas
-            resp = self.supabase.table('jogos').select('*').limit(1).execute()
-            resp_data = getattr(resp, 'data', resp)
-            logger.info(f"Supabase connected - test query response: {resp_data}")
+            if db:
+                test = db._execute_query("SELECT api_id FROM jogos LIMIT 1")
+                logger.info(f"DB connected - test query returned: {len(test)} rows")
+            else:
+                logger.warning("DB não inicializado; operações de consulta estarão limitadas")
         except Exception as e:
-            logger.error(f"Falha ao conectar no Supabase: {e}")
+            logger.error(f"Falha ao conectar no DB: {e}")
 
         logger.info("Bot inicializado com sucesso")
     
@@ -332,20 +331,23 @@ class FootballTipsterBot:
                         return orig, team_id
         # fallback: tentar buscar por nome no banco (home/away)
         try:
-            # procurar por substring em home_team_name ou away_team_name
-            resp = self.supabase.table('jogos').select('home_team_name,away_team_name,home_team_api_id,away_team_api_id').ilike('home_team_name', f'%{query}%').limit(1).execute()
-            if getattr(resp, 'data', None):
-                row = resp.data[0]
-                # preferir api id se existir
-                return row.get('home_team_name'), row.get('home_team_api_id')
+            # procurar por substring em home_team_name via SQL
+            if db:
+                q = f"%{query}%"
+                rows = db._execute_query("SELECT home_team_name, away_team_name, home_team_api_id, away_team_api_id FROM jogos WHERE lower(home_team_name) LIKE :q LIMIT 1", {'q': q.lower()})
+                if rows:
+                    row = rows[0]
+                    return row[0], row[2]
         except Exception:
             pass
 
         try:
-            resp = self.supabase.table('jogos').select('home_team_name,away_team_name,home_team_api_id,away_team_api_id').ilike('away_team_name', f'%{query}%').limit(1).execute()
-            if getattr(resp, 'data', None):
-                row = resp.data[0]
-                return row.get('away_team_name'), row.get('away_team_api_id')
+            if db:
+                q = f"%{query}%"
+                rows = db._execute_query("SELECT home_team_name, away_team_name, home_team_api_id, away_team_api_id FROM jogos WHERE lower(away_team_name) LIKE :q LIMIT 1", {'q': q.lower()})
+                if rows:
+                    row = rows[0]
+                    return row[1], row[3]
         except Exception:
             pass
 
@@ -396,45 +398,72 @@ class FootballTipsterBot:
 
     def _get_next_matches_from_supabase(self, team_id: int, limit: int = 5) -> List[Dict]:
         try:
+            if not db:
+                return []
             today_str = datetime.now().strftime('%Y-%m-%d')
-            resp = self.supabase.table('jogos').select('*').or_(f'home_team_api_id.eq.{team_id},away_team_api_id.eq.{team_id}').gte('start_time', today_str).order('start_time', count='planned').limit(limit).execute()
-            return getattr(resp, 'data', []) or []
+            sql = "SELECT * FROM jogos WHERE (home_team_api_id = :tid OR away_team_api_id = :tid) AND start_time >= :today ORDER BY start_time LIMIT :lim"
+            rows = db._execute_query(sql, {'tid': team_id, 'today': today_str, 'lim': limit})
+            # converter rows para dicts (SQLAlchemy RowProxy -> dict)
+            return [dict(r) for r in rows]
         except Exception as e:
-            logger.debug(f"Erro ao buscar próximos jogos no Supabase: {e}")
+            logger.debug(f"Erro ao buscar próximos jogos no DB: {e}")
             return []
 
     def _get_last_match_from_supabase(self, team_id: int) -> Optional[Dict]:
         try:
-            resp = self.supabase.table('jogos').select('*').or_(f'home_team_api_id.eq.{team_id},away_team_api_id.eq.{team_id}').lte('start_time', datetime.now().isoformat()).order('start_time', desc=True).limit(1).execute()
-            rows = getattr(resp, 'data', []) or []
-            return rows[0] if rows else None
+            if not db:
+                return None
+            sql = "SELECT * FROM jogos WHERE (home_team_api_id = :tid OR away_team_api_id = :tid) AND start_time <= :now ORDER BY start_time DESC LIMIT 1"
+            rows = db._execute_query(sql, {'tid': team_id, 'now': datetime.now().isoformat()})
+            if rows:
+                return dict(rows[0])
+            return None
         except Exception as e:
-            logger.debug(f"Erro ao buscar último jogo no Supabase: {e}")
+            logger.debug(f"Erro ao buscar último jogo no DB: {e}")
             return None
     
     def _save_fixture_to_db(self, fixture: Dict):
         """Salva jogo no Supabase"""
         try:
-            data = {
-                'api_fixture_id': fixture['fixture']['id'],
+            if not self.db:
+                logger.warning("Banco de dados não inicializado; ignorando salvar jogo")
+                return
+
+            api_id = fixture['fixture']['id']
+            params = {
+                'api_id': api_id,
                 'home_team_name': fixture['teams']['home']['name'],
                 'away_team_name': fixture['teams']['away']['name'],
                 'home_team_api_id': fixture['teams']['home']['id'],
                 'away_team_api_id': fixture['teams']['away']['id'],
                 'start_time': fixture['fixture']['date'],
                 'status': fixture['fixture']['status']['long'],
-                'home_score': fixture['goals']['home'],
-                'away_score': fixture['goals']['away']
+                'home_team_score': fixture['goals']['home'],
+                'away_team_score': fixture['goals']['away'],
+                'raw_payload': json.dumps(fixture, ensure_ascii=False)
             }
-            
-            resp = self.supabase.table('jogos').upsert(data, on_conflict='api_fixture_id').execute()
-            resp_data = getattr(resp, 'data', resp)
-            resp_error = getattr(resp, 'error', None)
-            logger.info(f"Supabase upsert response: {resp_data} | error: {resp_error}")
-            if resp_error:
-                logger.error(f"Erro ao salvar jogo no Supabase: {resp_error}")
-            else:
-                logger.info(f"Jogo salvo: {data['home_team_name']} vs {data['away_team_name']}")
+
+            sql = """
+            INSERT INTO jogos (api_id, home_team_name, away_team_name, home_team_api_id, away_team_api_id, start_time, status, home_team_score, away_team_score, raw_payload)
+            VALUES (:api_id, :home_team_name, :away_team_name, :home_team_api_id, :away_team_api_id, :start_time, :status, :home_team_score, :away_team_score, :raw_payload)
+            ON CONFLICT(api_id) DO UPDATE SET
+                home_team_name=excluded.home_team_name,
+                away_team_name=excluded.away_team_name,
+                home_team_api_id=excluded.home_team_api_id,
+                away_team_api_id=excluded.away_team_api_id,
+                start_time=excluded.start_time,
+                status=excluded.status,
+                home_team_score=excluded.home_team_score,
+                away_team_score=excluded.away_team_score,
+                raw_payload=excluded.raw_payload
+            RETURNING api_id
+            """
+
+            try:
+                ret = self.db._execute_insert_returning_id(sql, params)
+                logger.info(f"Jogo salvo/upserted com api_id={ret}")
+            except Exception as e:
+                logger.error(f"Erro ao executar upsert no DB local: {e}")
         
         except Exception as e:
             logger.error(f"Erro ao salvar jogo no DB: {e}")
@@ -448,16 +477,23 @@ class FootballTipsterBot:
             cached = self._get_cache(cache_key)
             if cached:
                 return cached
-            # Priorizar Supabase local
+            # Priorizar DB local
             today_str = self.today.strftime('%Y-%m-%d')
-            response = self.supabase.table('jogos').select('*').gte('start_time', today_str).lt('start_time', f'{today_str} 23:59:59').execute()
-            if getattr(response, 'data', None):
-                result = f"⚽ JOGOS DE HOJE ({self.today}) - Dados locais:\n"
-                for game in response.data[:50]:
-                    result += f"\n🏟️ {game.get('home_team_name') or game.get('home_team_score', '??')} vs {game.get('away_team_name') or game.get('away_team_score','??')}"
-                    result += f"\n📅 {game.get('start_time')}"
-                self._set_cache(cache_key, result)
-                return result
+            start = f"{today_str} 00:00:00"
+            end = f"{today_str} 23:59:59"
+            try:
+                rows = db._execute_query("SELECT * FROM jogos WHERE start_time >= :start AND start_time <= :end ORDER BY start_time", {'start': start, 'end': end})
+                if rows:
+                    result = f"⚽ JOGOS DE HOJE ({self.today}) - Dados locais:\n"
+                    for game in rows[:50]:
+                        # row pode ser RowProxy; converter para dict segura
+                        g = dict(game)
+                        result += f"\n🏟️ {g.get('home_team_name') or g.get('home_team_score', '??')} vs {g.get('away_team_name') or g.get('away_team_score','??')}"
+                        result += f"\n📅 {g.get('start_time')}"
+                    self._set_cache(cache_key, result)
+                    return result
+            except Exception as e:
+                logger.debug(f"Erro ao ler jogos de hoje do DB local: {e}")
 
             # Se não tiver no Supabase, tentar football-data (local/importado)
             if self.fd_client:
@@ -477,16 +513,20 @@ class FootballTipsterBot:
                     self._set_cache(cache_key, result)
                     return result
 
-            # Fallback final: banco local (mesmo que vazio)
-            today_str = self.today.strftime('%Y-%m-%d')
-            response = self.supabase.table('jogos').select('*').gte('start_time', today_str).lt('start_time', f'{today_str} 23:59:59').execute()
-            if not getattr(response, 'data', None):
+            # Fallback final: banco local simples
+            try:
+                rows = db._execute_query("SELECT * FROM jogos WHERE start_time >= :start AND start_time <= :end ORDER BY start_time", {'start': start, 'end': end})
+                if not rows:
+                    return f"❌ Nenhum jogo encontrado para hoje ({self.today})"
+                result = f"⚽ JOGOS DE HOJE ({self.today}) - Dados locais:\n"
+                for game in rows[:10]:
+                    g = dict(game)
+                    result += f"\n🏟️ {g.get('home_team_name')} vs {g.get('away_team_name')}"
+                    result += f"\n📅 {g.get('start_time')}"
+                return result
+            except Exception as e:
+                logger.debug(f"Erro no fallback local ao buscar jogos de hoje: {e}")
                 return f"❌ Nenhum jogo encontrado para hoje ({self.today})"
-            result = f"⚽ JOGOS DE HOJE ({self.today}) - Dados locais:\n"
-            for game in response.data[:10]:
-                result += f"\n🏟️ {game.get('home_team_name')} vs {game.get('away_team_name')}"
-                result += f"\n📅 {game.get('start_time')}"
-            return result
         
         except Exception as e:
             logger.error(f"Erro ao buscar jogos de hoje: {e}")
@@ -499,15 +539,19 @@ class FootballTipsterBot:
             cached = self._get_cache(cache_key)
             if cached:
                 return cached
-            # Priorizar Supabase
-            today_str = self.today.strftime('%Y-%m-%d')
-            response = self.supabase.table('jogos').select('*').or_(f'home_team_api_id.eq.{team_id},away_team_api_id.eq.{team_id}').gte('start_time', today_str).order('start_time', count='planned').limit(1).execute()
-
-            if getattr(response, 'data', None) and len(response.data) > 0:
-                game = response.data[0]
-                result = f"📅 PRÓXIMO JOGO - {team_name.upper()}:\n🏟️ {game.get('home_team_name')} vs {game.get('away_team_name')}\n📅 {game.get('start_time')}"
-                self._set_cache(cache_key, result)
-                return result
+            # Priorizar DB local
+            try:
+                today_str = self.today.strftime('%Y-%m-%d')
+                start = f"{today_str} 00:00:00"
+                end = f"{today_str} 23:59:59"
+                rows = db._execute_query("SELECT * FROM jogos WHERE (home_team_api_id = :tid OR away_team_api_id = :tid) AND start_time >= :start ORDER BY start_time LIMIT 1", {'tid': team_id, 'start': start})
+                if rows:
+                    game = dict(rows[0])
+                    result = f"📅 PRÓXIMO JOGO - {team_name.upper()}:\n🏟️ {game.get('home_team_name')} vs {game.get('away_team_name')}\n📅 {game.get('start_time')}"
+                    self._set_cache(cache_key, result)
+                    return result
+            except Exception as e:
+                logger.debug(f"Erro ao buscar próximo jogo no DB local: {e}")
 
             # Tentar football-data como fallback
             if self.fd_client:
@@ -530,13 +574,16 @@ class FootballTipsterBot:
                         self._set_cache(cache_key, result)
                         return result
 
-            # Fallback final: banco local (vazio)
-            today_str = self.today.strftime('%Y-%m-%d')
-            response = self.supabase.table('jogos').select('*').or_(f'home_team_api_id.eq.{team_id},away_team_api_id.eq.{team_id}').gte('start_time', today_str).order('start_time').limit(1).execute()
-            if not getattr(response, 'data', None):
+            # Fallback final: banco local simples
+            try:
+                rows = db._execute_query("SELECT * FROM jogos WHERE (home_team_api_id = :tid OR away_team_api_id = :tid) AND start_time >= :start ORDER BY start_time LIMIT 1", {'tid': team_id, 'start': f"{self.today.strftime('%Y-%m-%d')} 00:00:00"})
+                if not rows:
+                    return f"❌ Nenhum próximo jogo encontrado para {team_name}"
+                game = dict(rows[0])
+                return f"📅 PRÓXIMO JOGO - {team_name.upper()}:\n🏟️ {game['home_team_name']} vs {game['away_team_name']}\n📅 {game['start_time']}"
+            except Exception as e:
+                logger.debug(f"Erro no fallback local ao buscar próximo jogo: {e}")
                 return f"❌ Nenhum próximo jogo encontrado para {team_name}"
-            game = response.data[0]
-            return f"📅 PRÓXIMO JOGO - {team_name.upper()}:\n🏟️ {game['home_team_name']} vs {game['away_team_name']}\n📅 {game['start_time']}"
         
         except Exception as e:
             logger.error(f"Erro ao buscar próximo jogo: {e}")
@@ -554,28 +601,28 @@ class FootballTipsterBot:
 
             # Priorizar dados locais no Supabase
             try:
-                resp = self.supabase.table('classificacao').select('*').order('position').execute()
-                if getattr(resp, 'data', None):
-                    rows = resp.data
+                rows = db._execute_query("SELECT * FROM classificacao ORDER BY position")
+                if rows:
                     result = f"🏆 CLASSIFICAÇÃO - BRASILEIRÃO SÉRIE A {datetime.now().year}\n\n"
                     result += f"{'Pos':<4} {'Time':<20} {'Pts':<5} {'J':<4} {'V-E-D':<10} {'SG':<5}\n"
                     result += "=" * 60 + "\n"
                     for team in rows[:20]:
-                        pos = team.get('position')
-                        name = team.get('team_name','')[:18]
-                        pts = team.get('points')
-                        played = team.get('played_games')
-                        wins = team.get('won')
-                        draws = team.get('draw')
-                        losses = team.get('lost')
-                        gd = team.get('goal_difference', 0)
+                        t = dict(team)
+                        pos = t.get('position')
+                        name = t.get('team_name','')[:18]
+                        pts = t.get('points')
+                        played = t.get('played_games')
+                        wins = t.get('won')
+                        draws = t.get('draw')
+                        losses = t.get('lost')
+                        gd = t.get('goal_difference', 0)
                         emoji = "🥇" if pos == 1 else "🥈" if pos == 2 else "🥉" if pos == 3 else "🔻" if pos > 16 else "  "
                         result += f"{emoji}{pos:<3} {name:<20} {pts:<5} {played:<4} {wins}-{draws}-{losses:<5} {gd:+3}\n"
                     result += "\n🔝 Libertadores: 1-6 | 🔻 Rebaixamento: 17-20"
                     self._set_cache(cache_key, result)
                     return result
             except Exception:
-                logger.debug('Erro ao ler tabela `classificacao` do Supabase')
+                logger.debug('Erro ao ler tabela `classificacao` do DB local')
 
             # Fallback: usar football-data.org via module hybrid
             if self.fd_client:
@@ -618,8 +665,10 @@ class FootballTipsterBot:
             # Tentar coletar estatísticas a partir do Supabase (tabela 'jogos')
             try:
                 # pegar últimos 50 jogos envolvendo o time
-                resp = self.supabase.table('jogos').select('*').or_(f'home_team_api_id.eq.{team_id},away_team_api_id.eq.{team_id}').order('start_time', desc=True).limit(50).execute()
-                rows = getattr(resp, 'data', []) or []
+                try:
+                    rows = db._execute_query("SELECT * FROM jogos WHERE home_team_api_id = :tid OR away_team_api_id = :tid ORDER BY start_time DESC LIMIT 50", {'tid': team_id})
+                except Exception:
+                    rows = []
                 if rows:
                     played = 0
                     wins = 0
@@ -909,7 +958,7 @@ def get_bot_instance():
     global _bot_instance
     if _bot_instance is None:
         _bot_instance = FootballTipsterBot(
-            supabase,
+            None,
             API_FOOTBALL_KEY,
             GROQ_API_KEY
         )
@@ -941,7 +990,7 @@ def main():
     print("=" * 70)
     print(f"📅 Data: {bot.today}")
     print(f"🤖 IA: {'✅ Ativa' if bot.ai_analyzer else '❌ Desabilitada'}")
-    print(f"🌐 Football-Data: {'✅ Disponível' if bot.fd_client else '❌ Indisponível'} | Supabase: {'✅ Conectado' if bot.supabase else '❌ Offline'}")
+    print(f"🌐 Football-Data: {'✅ Disponível' if bot.fd_client else '❌ Indisponível'} | DB: {'✅ Conectado' if bot.db else '❌ Offline'}")
     print("=" * 70)
     print("\n💬 Digite suas perguntas ou 'sair' para encerrar")
     print("💡 Digite 'ajuda' para ver comandos\n")

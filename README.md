@@ -1,7 +1,7 @@
 # TradeComigo - Plataforma Inteligente para Futebol Brasileiro
 
 ## 🚀 Visão Geral
-Sistema fullstack para análise, consulta e automação de dados de futebol brasileiro. Integra RAG (Retrieval-Augmented Generation), LLMs, Supabase/PostgreSQL, frontend Next.js e backend Flask/FastAPI. Permite queries naturais, estatísticas, histórico de jogos e integração com APIs externas.
+Sistema fullstack para análise, consulta e automação de dados de futebol brasileiro. Integra RAG (Retrieval-Augmented Generation), LLMs, armazenamento local (SQLite), frontend Next.js e backend Flask/FastAPI. Permite queries naturais, estatísticas, histórico de jogos e integração com APIs externas.
 
 ---
 
@@ -24,18 +24,17 @@ Sistema fullstack para análise, consulta e automação de dados de futebol bras
 ├── static/                   # Arquivos estáticos, CSS
 ├── .env                      # Configuração de ambiente (chaves, URLs)
 ├── requirements.txt          # Dependências Python
-├── SUPABASE_FIX.md           # Guia de troubleshooting Supabase
 └── README.md                 # Documentação principal
 ```
 
 ---
 
 ## 🛠️ Tecnologias
-- **Backend:** Flask, FastAPI, LangChain, Supabase, PostgreSQL
+- **Backend:** Flask, FastAPI, LangChain, SQLite (local)
 - **Frontend:** Next.js, React, TailwindCSS
 - **LLM:** Groq (Llama3-8b), LangChain-Groq
 - **RAG:** Text-to-SQL, custom prompts, few-shot learning
-- **Infra:** Supabase, Docker (opcional), PowerShell scripts
+- **Infra:** SQLite (local file), Docker (opcional), PowerShell scripts
 - **Testes:** Pytest, Vitest, Supertest
 
 ---
@@ -44,7 +43,7 @@ Sistema fullstack para análise, consulta e automação de dados de futebol bras
 1. Usuário faz pergunta (frontend)
 2. Frontend envia para `/ask` (backend Flask)
 3. Agente RAG processa, converte para SQL
-4. Consulta Supabase/PostgreSQL
+4. Consulta SQLite (arquivo local)
 5. Resposta formatada e enviada ao frontend
 
 ---
@@ -56,8 +55,8 @@ pip install -r requirements.txt
 cd frontend_next && npm install
 ```
 ### 2. Configurar `.env`
-- Chaves de API (Groq, Supabase)
-- URL do banco
+- Chaves de API (Groq)
+- Caminho do banco local (ex.: `DATABASE_URL=sqlite:///./db/tradecomigo.sqlite3`)
 ### 3. Iniciar Backend
 ```bash
 python backend_server.py
@@ -87,8 +86,8 @@ pytest tests/
 
 ---
 
-## 🩺 Troubleshooting
-- Veja `SUPABASE_FIX.md` para problemas de banco
+- ## 🩺 Troubleshooting
+- Logs detalhados no backend
 - Logs detalhados no backend
 - Mensagens de erro informativas para frontend
 
@@ -114,7 +113,7 @@ MIT
 
 ## 📚 Referências
 - [LangChain Docs](https://python.langchain.com/)
-- [Supabase Docs](https://supabase.com/docs)
+ 
 - [Groq API](https://groq.com/)
 - [Next.js](https://nextjs.org/)
 

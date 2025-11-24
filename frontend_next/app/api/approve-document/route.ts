@@ -1,65 +1,52 @@
 // app/api/approve-document/route.ts
-import { createClient } from '@/lib/supabase/server';
 import { NextRequest, NextResponse } from 'next/server';
+import fs from 'fs';
+import path from 'path';
 
-/**
- * API Route para aprovar um documento.
- * 1. Insere os dados revisados na tabela final 'documents'.
- * 2. Deleta (ou atualiza o status) do registro na tabela 'staging_documents'.
- */
+const DATA_DIR = path.join(process.cwd(), 'frontend_next', 'data');
+const STAGING_FILE = path.join(DATA_DIR, 'staging_documents.json');
+const DOCS_FILE = path.join(DATA_DIR, 'documents.json');
+
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(STAGING_FILE)) fs.writeFileSync(STAGING_FILE, '[]', 'utf-8');
+  if (!fs.existsSync(DOCS_FILE)) fs.writeFileSync(DOCS_FILE, '[]', 'utf-8');
+}
+
 export async function POST(request: NextRequest) {
-  // Usamos o cliente de servidor para operações seguras
-  const supabase = await createClient();
-
-  // Validar se o usuário está autenticado
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: 'Não autorizado' }, { status: 401 });
-  }
-
   try {
+    ensureDataDir();
     const { stagingId, content, metadata } = await request.json();
 
     if (!stagingId || !content || !metadata) {
       return NextResponse.json({ error: 'Dados incompletos fornecidos.' }, { status: 400 });
     }
 
-    // Passo 1: Inserir na tabela oficial 'documents'
-    // Aqui é onde a geração de embedding deve acontecer.
-    // Por simplicidade, vamos assumir que a geração é feita por um trigger no DB
-    // ou que será adicionada posteriormente.
-    const { error: insertError } = await supabase
-      .from('documents') // Sua tabela final com pgvector
-      .insert({
-        content: content,
-        metadata: metadata,
-        // embedding: '...', // O vetor seria inserido aqui
-        user_id: user.id
-      });
+    const stagingRaw = fs.readFileSync(STAGING_FILE, 'utf-8');
+    const stagingArr = JSON.parse(stagingRaw || '[]');
 
-    if (insertError) {
-      console.error('Supabase insert error:', insertError);
-      throw new Error(`Falha ao inserir na tabela final: ${insertError.message}`);
+    const idx = stagingArr.findIndex((r: any) => String(r.id) === String(stagingId));
+    if (idx === -1) {
+      return NextResponse.json({ error: 'Staging document not found' }, { status: 404 });
     }
 
-    // Passo 2: Deletar o registro da tabela de staging para evitar reprocessamento
-    const { error: deleteError } = await supabase
-      .from('staging_documents')
-      .delete()
-      .eq('id', stagingId);
+    const doc = {
+      id: String(Math.floor(Math.random() * 1e12)),
+      content,
+      metadata,
+      created_at: new Date().toISOString(),
+    };
 
-    if (deleteError) {
-      // CRÍTICO: O dado já foi inserido, mas a limpeza falhou.
-      // Logar este erro é vital para reconciliação manual.
-      console.error(
-        `CRITICAL: Failed to delete staging document (id: ${stagingId}) after approval. Manual cleanup required.`,
-        deleteError
-      );
-      // Não lançamos um erro para o cliente, pois a operação principal (inserção) foi bem-sucedida.
-    }
+    const docsRaw = fs.readFileSync(DOCS_FILE, 'utf-8');
+    const docsArr = JSON.parse(docsRaw || '[]');
+    docsArr.push(doc);
+    fs.writeFileSync(DOCS_FILE, JSON.stringify(docsArr, null, 2), 'utf-8');
+
+    // Remove from staging
+    stagingArr.splice(idx, 1);
+    fs.writeFileSync(STAGING_FILE, JSON.stringify(stagingArr, null, 2), 'utf-8');
 
     return NextResponse.json({ success: true, message: 'Documento aprovado e salvo com sucesso.' }, { status: 200 });
-
   } catch (error: any) {
     console.error('[API Approve Error]:', error);
     return NextResponse.json({ error: error.message || 'Erro interno do servidor.' }, { status: 500 });

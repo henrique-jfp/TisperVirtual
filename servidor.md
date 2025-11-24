@@ -90,9 +90,9 @@ O servidor atua como **Orquestrador**, delegando o processamento pesado para a n
 1.  **Cérebro (Raciocínio):**
     *   **Groq API:** Inferência ultra-rápida (Llama 3 / Mixtral).
     *   **Gemini Flash:** Janelas de contexto longas e análise multimodal.
-2.  **Memória (Conhecimento):**
-    *   **Supabase (Nuvem):** Banco de dados Postgres + `pgvector`.
-    *   Armazena vetores (embeddings) e histórico de operações.
+2. **Memória (Conhecimento):**
+    *   **Armazenamento local (SQLite):** Banco de dados SQLite local (ex.: `db/tradecomigo.sqlite3`) utilizado para persistência de tabelas e histórico.
+    *   Armazena vetores (embeddings) e histórico de operações quando aplicável (local ou remoto).
 3.  **Olhos (Extração):**
     *   Scripts Locais Python.
     *   Conversão HTML -> Markdown para ingestão de dados.
