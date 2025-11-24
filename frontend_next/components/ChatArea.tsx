@@ -114,7 +114,7 @@ export default function ChatArea() {
               className="text-center text-gray-500 dark:text-gray-400 mt-20"
             >
               <Bot className="mx-auto h-12 w-12 mb-4" />
-              <p className="text-lg">Como posso ajudar com dados do Brasileirão?</p>
+              <p className="text-lg">Como posso ajudar com dados do Brasileirão? (dev test)</p>
               <p className="text-sm">Pergunte sobre jogos, classificação, artilheiros ou times específicos.</p>
             </motion.div>
           )}

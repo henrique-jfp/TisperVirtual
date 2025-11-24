@@ -5,6 +5,9 @@ import { Toaster } from 'sonner'
 export const metadata = {
   title: 'Tipster IA - Dicas de Apostas',
   description: 'IA especializada em dicas de apostas de futebol',
+  icons: {
+    icon: '/favicon.svg'
+  }
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
