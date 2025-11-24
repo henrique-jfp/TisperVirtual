@@ -1,27 +1,38 @@
-from supabase import create_client, Client
 from typing import Dict, Any, Optional
+import os
+from dotenv import load_dotenv
+from coleta.banco_dados import BancoDados
 
-# --- Configurações e Conexão ---
-# Reutilize as mesmas credenciais do seu script de coleta
-SUPABASE_URL: str = "https://nflmvptqgicabovfmnos.supabase.co"
-SUPABASE_KEY: str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5mbG12cHRxZ2ljYWJvdmZtbm9zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM3NzEzNTAsImV4cCI6MjA3OTM0NzM1MH0.l-RuwMrLgQgfjp8XZQ7bpEwfKODo7qKEXOhGR49xJ9c"
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Carrega variáveis de ambiente
+load_dotenv()
+
+# Define a URL do banco, preferindo SQLITE local se não houver DATABASE_URL
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///" + os.path.join(os.path.dirname(__file__), "..", "db", "tradecomigo.sqlite3"))
+
+# Instancia e conecta o wrapper do banco
+db = BancoDados(DATABASE_URL)
+try:
+    db.conectar()
+except Exception as e:
+    print(f"[ERRO] ao conectar com o banco local: {e}")
+
 
 def get_team_id_by_name(name: str) -> Optional[int]:
-    """Busca o api_id de um time pelo nome."""
+    """Busca o ID primário do time pelo nome (case-insensitive)."""
     try:
-        response = supabase.table("times").select("api_id").ilike("name", f"%{name}%").limit(1).execute()
-        if response.data:
-            return response.data[0]['api_id']
+        query = "SELECT id, api_id, nome FROM times WHERE lower(nome) LIKE :pattern LIMIT 1"
+        pattern = f"%{name.lower()}%"
+        rows = db._execute_query(query, {'pattern': pattern})
+        if rows:
+            return rows[0][0]  # id (PK)
         return None
     except Exception as e:
         print(f"[ERRO] ao buscar ID do time '{name}': {e}")
         return None
 
+
 def get_last_game(team_name: str) -> Optional[Dict[str, Any]]:
-    """
-    Busca o último jogo CONCLUÍDO de um time específico, de forma bidirecional.
-    """
+    """Retorna o último jogo com status 'finalizado' para o time informado."""
     print(f"Buscando último jogo para: {team_name}")
     team_id = get_team_id_by_name(team_name)
     if not team_id:
@@ -29,25 +40,32 @@ def get_last_game(team_name: str) -> Optional[Dict[str, Any]]:
         return None
 
     try:
-        # A consulta precisa ser bidirecional (time pode ser mandante OU visitante)
-        response = supabase.table("jogos").select("*, home_team:times!jogos_home_team_api_id_fkey(name), away_team:times!jogos_away_team_api_id_fkey(name)") \
-            .filter("status", "eq", "Fim") \
-            .or_(f"home_team_api_id.eq.{team_id},away_team_api_id.eq.{team_id}") \
-            .order("start_time", desc=True) \
-            .limit(1) \
-            .execute()
-        
-        if response.data:
-            return response.data[0]
-        return None
+        query = (
+            "SELECT j.* FROM jogos j "
+            "WHERE (j.time_casa_id = :team_id OR j.time_fora_id = :team_id) AND j.status = 'finalizado' "
+            "ORDER BY j.data_hora DESC LIMIT 1"
+        )
+        rows = db._execute_query(query, {'team_id': team_id})
+        if not rows:
+            return None
+        row = rows[0]
+        # Converter row para dict simples (nome das colunas não retornadas pelo fetchall()).
+        # Para simplicidade, retornamos um mapping mínimo.
+        return {
+            'id': row[0],
+            'api_id': row[1],
+            'data_hora': row[4] if len(row) > 4 else None,
+            'gols_casa': row[10] if len(row) > 10 else None,
+            'gols_fora': row[11] if len(row) > 11 else None,
+            'status': row[15] if len(row) > 15 else None,
+        }
     except Exception as e:
         print(f"[ERRO] ao buscar último jogo: {e}")
         return None
 
+
 def get_head_to_head(team1_name: str, team2_name: str) -> Optional[Dict[str, Any]]:
-    """
-    Busca o último confronto direto entre dois times.
-    """
+    """Busca o último confronto direto entre dois times."""
     print(f"Buscando confronto direto: {team1_name} vs {team2_name}")
     team1_id = get_team_id_by_name(team1_name)
     team2_id = get_team_id_by_name(team2_name)
@@ -57,19 +75,23 @@ def get_head_to_head(team1_name: str, team2_name: str) -> Optional[Dict[str, Any
         return None
 
     try:
-        # A consulta verifica as duas combinações possíveis de mandante/visitante
-        query = f"home_team_api_id.eq.{team1_id},away_team_api_id.eq.{team2_id}"
-        inverse_query = f"home_team_api_id.eq.{team2_id},away_team_api_id.eq.{team1_id}"
-        
-        response = supabase.table("jogos").select("*, home_team:times!jogos_home_team_api_id_fkey(name), away_team:times!jogos_away_team_api_id_fkey(name)") \
-            .or_(f"and({query}),and({inverse_query})") \
-            .order("start_time", desc=True) \
-            .limit(1) \
-            .execute()
-
-        if response.data:
-            return response.data[0]
-        return None
+        query = (
+            "SELECT j.* FROM jogos j WHERE "
+            "(j.time_casa_id = :t1 AND j.time_fora_id = :t2) OR (j.time_casa_id = :t2 AND j.time_fora_id = :t1) "
+            "ORDER BY j.data_hora DESC LIMIT 1"
+        )
+        rows = db._execute_query(query, {'t1': team1_id, 't2': team2_id})
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            'id': row[0],
+            'api_id': row[1],
+            'data_hora': row[4] if len(row) > 4 else None,
+            'gols_casa': row[10] if len(row) > 10 else None,
+            'gols_fora': row[11] if len(row) > 11 else None,
+            'status': row[15] if len(row) > 15 else None,
+        }
     except Exception as e:
         print(f"[ERRO] ao buscar confronto direto: {e}")
         return None
